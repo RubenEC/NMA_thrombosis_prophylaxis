@@ -1,0 +1,1334 @@
+---
+title: "Final main analyses NMA"
+author: "RJ Eck"
+date: "31-10-2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, eval = T)
+
+#clean working environment
+rm(list=ls())
+```
+
+Load packages and functions
+```{r, libraries, message = F, warning = F}
+library(knitr)
+library(tidyverse)
+library(magrittr)
+library(broom)
+library(readxl)
+library(meta)
+library(gemtc) #beware: masks forest from meta package
+library(rjags)
+library(netmeta)
+library(here)
+library(BUGSnet)
+library(kableExtra)
+
+#load helper functions 
+source(here("Functions", "functions.R"), local = knitr::knit_global())
+
+#load data files
+load(here("Data","data.RData"))
+```
+
+
+# Main analysis - mortality
+**Define network**
+```{r, network}
+#sensitivity set
+sensitivity <- m
+
+#vector of studies focusing on populations of primary interest
+pop <- data %>% 
+  filter(population %in% c("cardiology","critically ill", "medical", "stroke")) %>% 
+  pull(study) %>%
+  unique()
+
+#vector of studies with uncommonly used interventions that may add heterogeneity
+int.sparse <- data %>% 
+  filter(treatment %in% c("vka", "tar", "heparinoid")) %>%
+  pull(study) %>%
+  unique()
+
+#main data, excluding uncommonly used interventions
+m <- m %>% 
+  filter(study %in% pop & !study %in% int.sparse)
+
+#basic descriptives
+dscr <- data.prep(arm.data = m,
+                  varname.t = "treatment",
+                  varname.s = "study")
+
+char <- net.tab(data = dscr,
+                outcome = "responders",
+                N = "sampleSize", 
+                type.outcome = "binomial",
+                time = NULL)
+
+#network summary statistics
+char$network
+#network summary statistics by treatment
+char$intervention 
+#network summary statistics according to direct comparisons
+char$comparison
+
+#network of all eligible trials, numbers represent direct comparisons
+network <- mtc.network(data = m, treatments = treat.code[treat.code$id %in% m$treatment,])
+net.plot(dscr, node.scale = 2, edge.scale=2,study.counts=TRUE)           
+```
+
+**Define and run the model**
+```{r, m.mcmc, eval = T}
+#define NMA model
+model <- mtc.model(network, 
+                    linearModel = "random", 
+                    type = "consistency",
+                    likelihood = "binom",
+                    link = "logit",
+                    n.chain = 4, 
+                    hy.prior = mtc.hy.prior("std.dev", "dunif", 0, "om.scale")) #set vague prior for between study heterogeneity 
+
+#run model
+m.mcmc <- mtc.run(model, 
+                 n.adapt = 50000, #burn-in
+                 n.iter = 250000, #iterations
+                 thin = 10)
+``` 
+
+**Algorithm convergence**
+```{r, fig.width=10, fig.height=8}
+#algorithm convergence, iteration plots
+plot(m.mcmc)
+gelman.plot(m.mcmc)
+
+#overall PSFR
+diag <- gelman.diag(m.mcmc); diag$psrf; diag$mpsrf
+
+```
+
+**Model fit**
+```{r, fig.width=8, fig.height = 6}
+m.mcmc$deviance$Dbar #residual deviance
+m.mcmc$deviance$`data points` #total data points
+m.mcmc$deviance$pD #effective parameters
+m.mcmc$deviance$DIC #deviance information criterion
+
+deviance <- mtc.deviance(m.mcmc) 
+
+#residual deviance plot
+mtc.devplot.annotated(deviance)
+
+#leverage plot
+mtc.levplot.annotated(deviance)
+
+```
+
+**Consistency: nodesplitting**
+```{r, nodesplit.m, eval = T, message = F}
+#assessment of consistency
+m.nodesplit <- mtc.nodesplit(network, 
+                            linearModel = "random", 
+                            n.adapt = 50000,
+                            n.iter = 250000,  
+                            thin = 10)
+```
+
+**Consistency: nodesplitting results**
+```{r, fig.height = 15}
+mtc.nodesplit.comparisons(network)
+
+plot(summary(m.nodesplit))
+```
+
+**Inferences**
+```{r}
+#overall results
+summary(m.mcmc)
+
+#efficacy compared to no intervention
+forest(relative.effect(m.mcmc, t1 = "none"), use.description = TRUE)
+
+#efficacy compared to placebo
+forest(relative.effect(m.mcmc, t1 = "placebo"), use.description = TRUE)
+
+#rank probability
+rank.prob <- rank.probability(m.mcmc, preferredDirection = -1)
+
+#rankogram
+plot(rank.prob, beside=TRUE, cex.names=0.75)
+
+#SUCRA
+cumrank.prob <- apply(t(rank.prob), 2, cumsum)
+sucra <- round(colMeans(cumrank.prob[-nrow(cumrank.prob),]),4)
+print(sucra)
+
+```
+
+**Calculate mean ranks**
+```{r}
+#calculate mean ranks
+ranks <- rank.prob
+print(ranks)
+
+meanranks <- as.table(c(
+#DOAC
+meanrank.doac <- 1*ranks[1,1] + 2*ranks[1,2] + 3*ranks[1,3] + 4*ranks[1,4]+ 5*ranks[1,5] + 6*ranks[1,6] + 7*ranks[1,7] + 8*ranks[1,8],
+#lmwh_int
+meanrank.lmwh_int <- 1*ranks[2,1] + 2*ranks[2,2] + 3*ranks[2,3] + 4*ranks[2,4]+ 5*ranks[2,5] + 6*ranks[2,6] + 7*ranks[2,7] + 8*ranks[2,8],
+#lmwh_low
+meanrank.lmwh_low <- 1*ranks[3,1] + 2*ranks[3,2] + 3*ranks[3,3] + 4*ranks[3,4]+ 5*ranks[3,5] + 6*ranks[3,6] + 7*ranks[3,7] + 8*ranks[3,8],
+#none
+meanrank.none <- 1*ranks[4,1] + 2*ranks[4,2] + 3*ranks[4,3] + 4*ranks[4,4]+ 5*ranks[4,5] + 6*ranks[4,6] + 7*ranks[4,7] + 8*ranks[4,8],
+#pentasach
+meanrank.pentasach <- 1*ranks[5,1] + 2*ranks[5,2] + 3*ranks[5,3] + 4*ranks[5,4]+ 5*ranks[5,5] + 6*ranks[5,6] + 7*ranks[5,7] + 8*ranks[5,8],
+#placebo
+meanrank.placebo <- 1*ranks[6,1] + 2*ranks[6,2] + 3*ranks[6,3] + 4*ranks[6,4]+ 5*ranks[6,5] + 6*ranks[6,6] + 7*ranks[6,7] + 8*ranks[6,8],
+#ufh_int
+meanrank.ufh_int <- 1*ranks[7,1] + 2*ranks[7,2] + 3*ranks[7,3] + 4*ranks[7,4]+ 5*ranks[7,5] + 6*ranks[7,6] + 7*ranks[7,7] + 8*ranks[7,8],
+#ufh_low
+meanrank.ufh_low <- 1*ranks[8,1] + 2*ranks[8,2] + 3*ranks[8,3] + 4*ranks[8,4]+ 5*ranks[8,5] + 6*ranks[8,6] + 7*ranks[8,7] + 8*ranks[8,8]
+))
+
+print(round(meanranks,1))
+
+```
+
+**Overview of prior distributions**
+```{r}
+#between-trial standard deviation: 
+m.mcmc$model$hy.prior
+m.mcmc$model$om.scale
+
+#trial baselines and effect estimates: 
+#obtain standard deviation for the relative effects prior (normal distribution).
+m.mcmc$model$re.prior.sd 
+
+#calculate the precision: 
+1/(m.mcmc$model$re.prior.sd^2)
+```
+
+**Calculate prediction intervals**
+```{r}
+#rename treatments to numeric
+tmp <- m %>% mutate(treatment = ifelse(treatment=="placebo",1,
+                                ifelse(treatment=="none",2,
+                                ifelse(treatment=="lmwh_low",3,
+                                ifelse(treatment=="lmwh_int",4,
+                                ifelse(treatment=="ufh_low",5,
+                                ifelse(treatment=="ufh_int",6,
+                                ifelse(treatment=="pentasach",7,
+                                ifelse(treatment=="doac",8,NA)))))))))
+
+#redefine the network in order to retrieve the data in the format required for the gemtc rjags code
+network <- mtc.network(data = tmp)
+
+model <- mtc.model(network, 
+                    linearModel = "random", 
+                    type = "consistency",
+                    likelihood = "binom",
+                    link = "logit",
+                    n.chain = 4, 
+                    hy.prior = mtc.hy.prior("std.dev", "dunif", 0, "om.scale"))
+
+dat <- model$dat
+
+#define the rjags code, based on gemtc output and supplemented to calculate prediction intervals
+model <- "model {
+	# Likelihood for arm-based data
+	for (i in studies.a) {
+		for (k in 1:na[i]) {
+			logit(p[i, k]) <- mu[i] + delta[i, k]
+			r[i, k] ~ dbin(p[i, k], n[i, k])
+			
+			rhat[i, k] <- p[i, k] * n[i, k]
+			dev[i, k] <- 2 *
+			  (r[i, k] * (log(r[i, k]) - log(rhat[i, k])) +
+			   (n[i, k]-r[i, k]) * (log(n[i, k] - r[i, k]) - log(n[i, k] - rhat[i, k])))
+		}
+	}
+	# Likelihood for contrast-based data (univariate for 2-arm trials)
+	## OMITTED
+	# Likelihood for contrast-based data (multivariate for multi-arm trials)
+	## OMITTED
+
+	# Random effects model
+	for (i in studies) {
+		# Study-level relative effects
+		w[i, 1] <- 0
+		delta[i, 1] <- 0
+		for (k in 2:na[i]) { # parameterize multi-arm trials using a trick to avoid dmnorm
+			delta[i, k] ~ dnorm(md[i, k], taud[i, k])
+			md[i, k] <- d[t[i, 1], t[i, k]] + sw[i, k]
+			taud[i, k] <- tau.d * 2 * (k - 1) / k
+			w[i, k] <- delta[i, k] - (d[t[i, 1], t[i, k]])
+			sw[i, k] <- sum(w[i, 1:(k-1)]) / (k - 1)
+		}
+	}
+	
+	# Random effects variance prior
+	sd.d ~ dunif(0, om.scale)
+	tau.d <- pow(sd.d, -2)
+
+	# Relative effect matrix
+	d[1, 1] <- 0
+	d[1, 2] <- d.1.5 + d.5.2
+	d[1, 3] <- d.1.3
+	d[1, 4] <- d.1.4
+	d[1, 5] <- d.1.5
+	d[1, 6] <- d.1.3 + d.3.6
+	d[1, 7] <- d.1.7
+	d[1, 8] <- d.1.4 + d.4.8
+	for (i in 2:nt) {
+		for (j in 1:nt) {
+			d[i, j] <- d[1, j] - d[1, i]
+		}
+	}
+
+	prior.prec <- pow(re.prior.sd, -2)
+
+	# Study baseline priors
+	for (i in studies.a) {
+	  mu[i] ~ dnorm(0, prior.prec)
+	}
+
+	# Effect parameter priors
+	d.1.3 ~ dnorm(0, prior.prec)
+	d.1.4 ~ dnorm(0, prior.prec)
+	d.1.5 ~ dnorm(0, prior.prec)
+	d.1.7 ~ dnorm(0, prior.prec)
+	d.3.6 ~ dnorm(0, prior.prec)
+	d.4.8 ~ dnorm(0, prior.prec)
+	d.5.2 ~ dnorm(0, prior.prec)
+
+  # Prediction intervals
+  pred.d.12 ~ dnorm(d[1, 2], tau.d) 
+  pred.d.13 ~ dnorm(d[1, 3], tau.d)
+  pred.d.14 ~ dnorm(d[1, 4], tau.d) 
+  pred.d.15 ~ dnorm(d[1, 5], tau.d) 
+  pred.d.16 ~ dnorm(d[1, 6], tau.d) 
+  pred.d.17 ~ dnorm(d[1, 7], tau.d)
+  pred.d.18 ~ dnorm(d[1, 8], tau.d) 
+  
+  # Prediction intervals (odds ratio scale)
+  pred.or.12 <- exp(pred.d.12)
+  pred.or.13 <- exp(pred.d.13)
+  pred.or.14 <- exp(pred.d.14)
+  pred.or.15 <- exp(pred.d.15)
+  pred.or.16 <- exp(pred.d.16)
+  pred.or.17 <- exp(pred.d.17)
+  pred.or.18 <- exp(pred.d.18)
+}"
+```
+
+```{r, eval = T}
+#fit and run model
+model.fit <- jags.model(file=textConnection(model), data = dat, n.chains = 4)
+
+update(model.fit, 50000)
+
+samples <- coda.samples(model.fit, n.iter=250000, thin = 10, variable.names = c("sd.d","pred.or.12","pred.or.13","pred.or.14","pred.or.15","pred.or.16","pred.or.17","pred.or.18"))
+```
+
+```{r, fig.width=10, fig.height=8}
+#convergence
+plot(samples, trace=TRUE, density = TRUE)  
+
+#prediction interval credible intervals
+pred <- as.data.frame(summary(samples)[2]) %>% 
+  rownames_to_column() %>% 
+  select(rowname, quantiles.2.5., quantiles.50., quantiles.97.5.) %>%
+  rename(comp = rowname, ci.l = quantiles.2.5., median=quantiles.50., ci.u=quantiles.97.5.) %>%
+  mutate_if(is.numeric, round,2)
+
+print(pred)
+
+```
+
+# Main analysis - venous thromboembolism
+**Define network**
+```{r, network}
+#sensitivity set
+sensitivity <- v
+
+#vector of studies focusing on populations of primary interest
+pop <- data %>% 
+  filter(population %in% c("cardiology","critically ill", "medical", "stroke")) %>% 
+  pull(study) %>%
+  unique()
+
+#vector of studies with uncommonly used interventions that may add heterogeneity
+int.sparse <- data %>% 
+  filter(treatment %in% c("vka", "tar", "heparinoid")) %>%
+  pull(study) %>%
+  unique()
+
+#vector of studies with unclear specification of vte outcomes
+unclear <- c("Kapoor1999","Mccarthy1986")
+
+#main data for analyses
+v <- v %>% 
+  filter(study %in% pop & !study %in% int.sparse & !study %in% unclear)
+
+#basic descriptives
+dscr <- data.prep(arm.data = v,
+                  varname.t = "treatment",
+                  varname.s = "study")
+
+char <- net.tab(data = dscr,
+                outcome = "responders",
+                N = "sampleSize", 
+                type.outcome = "binomial",
+                time = NULL)
+
+#network summary statistics
+char$network
+#network summary statistics by treatment
+char$intervention 
+#network summary statistics according to direct comparisons
+char$comparison
+
+#network of all eligible trials, numbers represent direct comparisons
+network <- mtc.network(data = v, treatments = treat.code[treat.code$id %in% v$treatment,])
+net.plot(dscr, node.scale = 2, edge.scale=2,study.counts=TRUE)   
+```
+
+**Define and run the model**
+```{r, v.mcmc, eval = T}
+#define NMA model
+model <- mtc.model(network, 
+                    linearModel = "random", 
+                    type = "consistency",
+                    likelihood = "binom",
+                    link = "logit",
+                    n.chain = 4, 
+                    hy.prior = mtc.hy.prior("std.dev", "dunif", 0, "om.scale")) #set vague prior for between study heterogeneity 
+
+#run model
+v.mcmc <- mtc.run(model,
+                 n.adapt = 50000, #burn-in
+                 n.iter = 250000, #iterations
+                 thin = 10)
+``` 
+
+**Algorithm convergence**
+```{r, figures-v.mcmc, fig.width=10, fig.height=8}
+#algorithm convergence, iteration plots
+plot(v.mcmc)
+gelman.plot(v.mcmc)
+
+#overall PSFR
+diag <- gelman.diag(v.mcmc); diag$psrf; diag$mpsrf
+
+```
+
+**Model fit**
+```{r, figures-deviance, fig.width=6, fig.height = 6}
+v.mcmc$deviance$Dbar #residual deviance
+v.mcmc$deviance$`data points` #total data points
+v.mcmc$deviance$pD #effective parameters
+v.mcmc$deviance$DIC #deviance information criterion
+
+deviance <- mtc.deviance(v.mcmc) 
+
+#residual deviance plot
+mtc.devplot.annotated(deviance)
+
+#leverage plot
+mtc.levplot.annotated(deviance)
+
+```
+
+**Consistency: nodesplitting**
+```{r, nodesplit, eval = T, message = F}
+#assessment of consistency
+v.nodesplit <- mtc.nodesplit(network, 
+                            linearModel = "random", 
+                            n.adapt = 50000, 
+                            n.iter = 250000, 
+                            thin = 10)
+```
+
+```{r}
+#consistency evaluation leads to numerical instability in the ufh_low vs none comparison most likely due to sparse events 
+plot(summary(v.nodesplit))
+
+#convergence plots of the VTE nodesplitting without continuity correction
+devAskNewPage(ask = FALSE)
+plot(v.nodesplit$d.none.ufh_low)
+
+#transform data to relative effects using the pairwise function from the netmeta package, applying a continuity correction of 0.5 to 0 event studies
+v2 <- pairwise(treat = v$treatment, 
+               event = v$responders,
+               n = v$sampleSize,
+               studlab = v$study,
+               data = v,
+               reference.group="placebo",
+               incr=0.5,
+               sm="OR")
+
+#select appropriate columns and transform the data to the format required by the gemtc package
+v2 <- as_tibble(v2)
+v2<- v2 %>%
+  select(study, treat1, treat2, TE, seTE) %>%
+  pivot_longer(-study,
+               names_to = c(".value"),
+               names_pattern = "(..)") %>% 
+  set_colnames(c("study", "treatment","diff", "std.err"))
+
+#multi-arm trials
+v2 %>% 
+  pull(study) %>% 
+  table() %>% 
+  {.[. > 2]}
+
+#remove redudant rows in multi-arm trials that were created when pivotting data and calculate base arm SE (assuming correlation=0.5)
+multi1 <- v2 %>%
+  group_by(study) %>%
+  filter(study %in% c("Kay1995", "Samama1999","Levi2007")) %>%
+  slice(1:3) %>%
+  mutate(std.err = ifelse(is.na(std.err),lag(std.err)*lead(std.err)*0.5,std.err))
+
+multi2 <- v2 %>%
+  filter(study == "Ist1997") %>%
+  slice(3:5) %>%
+  mutate(std.err = ifelse(is.na(std.err),lag(std.err)*lead(std.err)*0.5,std.err))
+
+#combine for total dataset
+v2 <- v2 %>%
+  filter(!study %in% c("Kay1995","Samama1999","Ist1997","Levi2007")) %>%
+  full_join(multi1) %>%
+  full_join(multi2)
+
+```
+
+```{r, eval = T}
+#re-do nodesplitting using relative effects data 
+network <- mtc.network(data.re = v2)
+
+v2.nodesplit <- mtc.nodesplit(network, 
+                    linearModel = "random", 
+                    likelihood = "binom",
+                    link = "logit", 
+                    n.adapt = 50000, 
+                    n.iter = 250000, 
+                    thin = 10)
+```
+
+**Consistency: nodesplitting results**
+```{r, fig.height = 15}
+mtc.nodesplit.comparisons(network)
+
+plot(summary(v2.nodesplit))
+
+```
+
+**Inferences**
+```{r}
+#overall results
+summary(v.mcmc)
+
+#efficacy compared to none
+forest(relative.effect(v.mcmc, t1 = "none"), use.description = TRUE)
+
+#efficacy compared to placebo
+forest(relative.effect(v.mcmc, t1 = "placebo"), use.description = TRUE)
+
+#rank probability
+rank.prob <- rank.probability(v.mcmc, preferredDirection = -1)
+
+#rankogram
+plot(rank.prob, beside=TRUE, cex.names=0.75)
+
+#SUCRA
+cumrank.prob <- apply(t(rank.prob), 2, cumsum)
+sucra <- round(colMeans(cumrank.prob[-nrow(cumrank.prob),]),4)
+print(sucra)
+```
+
+**Calculate mean ranks**
+```{r}
+#calculate mean ranks
+ranks <- rank.prob
+print(ranks)
+
+meanranks <- as.table(c(
+#DOAC
+meanrank.doac <- 1*ranks[1,1] + 2*ranks[1,2] + 3*ranks[1,3] + 4*ranks[1,4]+ 5*ranks[1,5] + 6*ranks[1,6] + 7*ranks[1,7] + 8*ranks[1,8],
+#lmwh_int
+meanrank.lmwh_int <- 1*ranks[2,1] + 2*ranks[2,2] + 3*ranks[2,3] + 4*ranks[2,4]+ 5*ranks[2,5] + 6*ranks[2,6] + 7*ranks[2,7] + 8*ranks[2,8],
+#lmwh_low
+meanrank.lmwh_low <- 1*ranks[3,1] + 2*ranks[3,2] + 3*ranks[3,3] + 4*ranks[3,4]+ 5*ranks[3,5] + 6*ranks[3,6] + 7*ranks[3,7] + 8*ranks[3,8],
+#none
+meanrank.none <- 1*ranks[4,1] + 2*ranks[4,2] + 3*ranks[4,3] + 4*ranks[4,4]+ 5*ranks[4,5] + 6*ranks[4,6] + 7*ranks[4,7] + 8*ranks[4,8],
+#pentasach
+meanrank.pentasach <- 1*ranks[5,1] + 2*ranks[5,2] + 3*ranks[5,3] + 4*ranks[5,4]+ 5*ranks[5,5] + 6*ranks[5,6] + 7*ranks[5,7] + 8*ranks[5,8],
+#placebo
+meanrank.placebo <- 1*ranks[6,1] + 2*ranks[6,2] + 3*ranks[6,3] + 4*ranks[6,4]+ 5*ranks[6,5] + 6*ranks[6,6] + 7*ranks[6,7] + 8*ranks[6,8],
+#ufh_int
+meanrank.ufh_int <- 1*ranks[7,1] + 2*ranks[7,2] + 3*ranks[7,3] + 4*ranks[7,4]+ 5*ranks[7,5] + 6*ranks[7,6] + 7*ranks[7,7] + 8*ranks[7,8],
+#ufh_low
+meanrank.ufh_low <- 1*ranks[8,1] + 2*ranks[8,2] + 3*ranks[8,3] + 4*ranks[8,4]+ 5*ranks[8,5] + 6*ranks[8,6] + 7*ranks[8,7] + 8*ranks[8,8]
+))
+
+print(round(meanranks,1))
+
+```
+
+**Overview of prior distributions**
+```{r}
+#between-trial standard deviation: 
+v.mcmc$model$hy.prior
+v.mcmc$model$om.scale
+
+#trial baselines and effect estimates: 
+#obtain standard deviation for the relative effects prior (normal distribution).
+v.mcmc$model$re.prior.sd 
+
+#calculate the precision: 
+1/(v.mcmc$model$re.prior.sd^2)
+```
+
+**Calculate prediction intervals**
+```{r}
+#rename treatments to numeric
+tmp <- v %>% mutate(treatment = ifelse(treatment=="placebo",1,
+                                ifelse(treatment=="none",2,
+                                ifelse(treatment=="lmwh_low",3,
+                                ifelse(treatment=="lmwh_int",4,
+                                ifelse(treatment=="ufh_low",5,
+                                ifelse(treatment=="ufh_int",6,
+                                ifelse(treatment=="pentasach",7,
+                                ifelse(treatment=="doac",8,NA)))))))))
+
+#redefine the network in order to retrieve the data in the format required for the gemtc rjags code
+network <- mtc.network(data = tmp)
+
+model <- mtc.model(network, 
+                    linearModel = "random", 
+                    type = "consistency",
+                    likelihood = "binom",
+                    link = "logit",
+                    n.chain = 4, 
+                    hy.prior = mtc.hy.prior("std.dev", "dunif", 0, "om.scale"))
+
+dat <- model$dat
+
+#define the rjags code, based on gemtc output and supplemented to calculate prediction intervals
+model <- "model {
+	# Likelihood for arm-based data
+	for (i in studies.a) {
+		for (k in 1:na[i]) {
+			logit(p[i, k]) <- mu[i] + delta[i, k]
+			r[i, k] ~ dbin(p[i, k], n[i, k])
+			
+			rhat[i, k] <- p[i, k] * n[i, k]
+			dev[i, k] <- 2 *
+			  (r[i, k] * (log(r[i, k]) - log(rhat[i, k])) +
+			   (n[i, k]-r[i, k]) * (log(n[i, k] - r[i, k]) - log(n[i, k] - rhat[i, k])))
+		}
+	}
+	# Likelihood for contrast-based data (univariate for 2-arm trials)
+	## OMITTED
+	# Likelihood for contrast-based data (multivariate for multi-arm trials)
+	## OMITTED
+
+	# Random effects model
+	for (i in studies) {
+		# Study-level relative effects
+		w[i, 1] <- 0
+		delta[i, 1] <- 0
+		for (k in 2:na[i]) { # parameterize multi-arm trials using a trick to avoid dmnorm
+			delta[i, k] ~ dnorm(md[i, k], taud[i, k])
+			md[i, k] <- d[t[i, 1], t[i, k]] + sw[i, k]
+			taud[i, k] <- tau.d * 2 * (k - 1) / k
+			w[i, k] <- delta[i, k] - (d[t[i, 1], t[i, k]])
+			sw[i, k] <- sum(w[i, 1:(k-1)]) / (k - 1)
+		}
+	}
+	
+	# Random effects variance prior
+	sd.d ~ dunif(0, om.scale)
+	tau.d <- pow(sd.d, -2)
+
+	# Relative effect matrix
+	d[1, 1] <- 0
+	d[1, 2] <- d.1.5 + d.5.2
+	d[1, 3] <- d.1.3
+	d[1, 4] <- d.1.4
+	d[1, 5] <- d.1.5
+	d[1, 6] <- d.1.3 + d.3.6
+	d[1, 7] <- d.1.7
+	d[1, 8] <- d.1.4 + d.4.8
+	for (i in 2:nt) {
+		for (j in 1:nt) {
+			d[i, j] <- d[1, j] - d[1, i]
+		}
+	}
+
+	prior.prec <- pow(re.prior.sd, -2)
+
+	# Study baseline priors
+	for (i in studies.a) {
+	  mu[i] ~ dnorm(0, prior.prec)
+	}
+
+	# Effect parameter priors
+	d.1.3 ~ dnorm(0, prior.prec)
+	d.1.4 ~ dnorm(0, prior.prec)
+	d.1.5 ~ dnorm(0, prior.prec)
+	d.1.7 ~ dnorm(0, prior.prec)
+	d.3.6 ~ dnorm(0, prior.prec)
+	d.4.8 ~ dnorm(0, prior.prec)
+	d.5.2 ~ dnorm(0, prior.prec)
+
+  # Prediction intervals
+  pred.d.12 ~ dnorm(d[1, 2], tau.d) 
+  pred.d.13 ~ dnorm(d[1, 3], tau.d)
+  pred.d.14 ~ dnorm(d[1, 4], tau.d) 
+  pred.d.15 ~ dnorm(d[1, 5], tau.d) 
+  pred.d.16 ~ dnorm(d[1, 6], tau.d) 
+  pred.d.17 ~ dnorm(d[1, 7], tau.d)
+  pred.d.18 ~ dnorm(d[1, 8], tau.d) 
+  
+  # Prediction intervals (odds ratio scale)
+  pred.or.12 <- exp(pred.d.12)
+  pred.or.13 <- exp(pred.d.13)
+  pred.or.14 <- exp(pred.d.14)
+  pred.or.15 <- exp(pred.d.15)
+  pred.or.16 <- exp(pred.d.16)
+  pred.or.17 <- exp(pred.d.17)
+  pred.or.18 <- exp(pred.d.18)
+}"
+```
+
+```{r, eval = T}
+#fit and run model
+model.fit <- jags.model(file=textConnection(model), data = dat, n.chains = 4)
+
+update(model.fit, 50000)
+
+samples <- coda.samples(model.fit, n.iter=250000, thin = 10, variable.names = c("sd.d","pred.or.12","pred.or.13","pred.or.14","pred.or.15","pred.or.16","pred.or.17","pred.or.18"))
+```
+
+```{r, fig.width=10, fig.height=8}
+#convergence
+plot(samples, trace=TRUE, density = TRUE)  
+
+#prediction interval credible intervals
+pred <- as.data.frame(summary(samples)[2]) %>% 
+  rownames_to_column() %>% 
+  select(rowname, quantiles.2.5., quantiles.50., quantiles.97.5.) %>%
+  rename(comp = rowname, ci.l = quantiles.2.5., median=quantiles.50., ci.u=quantiles.97.5.) %>%
+  mutate_if(is.numeric, round,2)
+
+print(pred)
+
+```
+
+
+# Main analysis - major bleeding
+**Define network**
+```{r, network}
+#sensitivity set
+sensitivity <- b
+
+#vector of studies focusing on populations of primary interest
+pop <- data %>% 
+  filter(population %in% c("cardiology","critically ill", "medical", "stroke")) %>% 
+  pull(study) %>%
+  unique()
+
+#vector of studies with uncommonly used interventions that may add heterogeneity
+int.sparse <- data %>% 
+  filter(treatment %in% c("vka", "tar", "heparinoid")) %>%
+  pull(study) %>%
+  unique()
+
+#main data, excluding uncommonly used interventions
+b <- b %>% 
+  filter(study %in% pop & !study %in% int.sparse)
+
+#basic descriptives
+dscr <- data.prep(arm.data = b,
+                  varname.t = "treatment",
+                  varname.s = "study")
+
+char <- net.tab(data = dscr,
+                outcome = "responders",
+                N = "sampleSize", 
+                type.outcome = "binomial",
+                time = NULL)
+
+#network summary statistics
+char$network
+#network summary statistics by treatment
+char$intervention 
+#network summary statistics according to direct comparisons
+char$comparison
+
+#network of all eligible trials, numbers represent direct comparisons
+network <- mtc.network(data = b, treatments = treat.code[treat.code$id %in% b$treatment,])
+net.plot(dscr, node.scale = 2, edge.scale=2,study.counts=TRUE)
+```
+
+**Define and run the model**
+```{r, b.mcmc, eval = T}
+#define NMA model
+model <- mtc.model(network, 
+                    linearModel = "random", 
+                    type = "consistency",
+                    likelihood = "binom",
+                    link = "logit",
+                    n.chain = 4, 
+                    hy.prior = mtc.hy.prior("std.dev", "dunif", 0, "om.scale")) #set vague prior for between study heterogeneity 
+
+#run model
+b.mcmc <- mtc.run(model, 
+                 n.adapt = 50000, #burn-in
+                 n.iter = 250000, #iterations
+                 thin = 10)
+``` 
+
+**Algorithm convergence**
+```{r, figures-b.mcmc, fig.width=10, fig.height=8}
+#algorithm convergence, iteration plots and prior densities
+plot(b.mcmc)
+gelman.plot(b.mcmc)
+
+#overall PSFR
+diag <- gelman.diag(b.mcmc); diag$psrf; diag$mpsrf
+
+```
+
+**Model fit**
+```{r, figures-deviance, fig.width=6, fig.height = 6}
+b.mcmc$deviance$Dbar #residual deviance
+b.mcmc$deviance$`data points` #total data points
+b.mcmc$deviance$pD #effective parameters
+b.mcmc$deviance$DIC #deviance information criterion
+
+deviance <- mtc.deviance(b.mcmc) 
+
+#residual deviance plot
+mtc.devplot.annotated(deviance)
+
+#leverage plot
+mtc.levplot.annotated(deviance)
+
+```
+
+**Consistency: nodesplitting**
+```{r, nodesplit, eval = T, message = F}
+#assessment of consistency
+b.nodesplit <- mtc.nodesplit(network, 
+                            linearModel = "random", 
+                            n.adapt = 50000, 
+                            n.iter = 250000, 
+                            thin = 10)
+```
+
+```{r}
+#consistency evaluation is suggestive of remaining inconsistency. 
+plot(summary(b.nodesplit))
+
+#Upon closer inspection this inconsistency is probably caused by the UFH low vs LMWH low direct comparison. This comparison is informed by 3 studies that detected only 1 bleeding event in the lmwh_low arm, whereas they detected 8 bleeding events in the UFH_low arms
+b %>% filter(study %in% c("Aquino1990","Forette1995","Bergmann1996"))
+
+#This translates into a very large and imprecise direct intervention effect, that very likely also influences the indirect estimate of ufh_int vs lmwh_low. Although it’s possible (and maybe even likely) that UFH low truly performs worse than lmwh low, we would argue this inconsistency is mainly driven by sparse events and sampling variation. Therefore we do not regard this as problematic. 
+```
+
+**Inferences**
+```{r}
+#overall results
+summary(b.mcmc)
+
+#efficacy compared to none
+forest(relative.effect(b.mcmc, t1 = "none"), use.description = TRUE)
+
+#efficacy compared to placebo
+forest(relative.effect(b.mcmc, t1 = "placebo"), use.description = TRUE)
+
+#rank probability
+rank.prob <- rank.probability(b.mcmc, preferredDirection = -1)
+
+#rankogram
+plot(rank.prob, beside=TRUE, cex.names=0.75)
+
+#SUCRA
+cumrank.prob <- apply(t(rank.prob), 2, cumsum)
+sucra <- round(colMeans(cumrank.prob[-nrow(cumrank.prob),]),4)
+print(sucra)
+
+```
+
+**Calculate mean ranks**
+```{r}
+#calculate mean ranks
+ranks <- rank.prob
+print(ranks)
+
+meanranks <- as.table(c(
+#DOAC
+meanrank.doac <- 1*ranks[1,1] + 2*ranks[1,2] + 3*ranks[1,3] + 4*ranks[1,4]+ 5*ranks[1,5] + 6*ranks[1,6] + 7*ranks[1,7] + 8*ranks[1,8],
+#lmwh_int
+meanrank.lmwh_int <- 1*ranks[2,1] + 2*ranks[2,2] + 3*ranks[2,3] + 4*ranks[2,4]+ 5*ranks[2,5] + 6*ranks[2,6] + 7*ranks[2,7] + 8*ranks[2,8],
+#lmwh_low
+meanrank.lmwh_low <- 1*ranks[3,1] + 2*ranks[3,2] + 3*ranks[3,3] + 4*ranks[3,4]+ 5*ranks[3,5] + 6*ranks[3,6] + 7*ranks[3,7] + 8*ranks[3,8],
+#none
+meanrank.none <- 1*ranks[4,1] + 2*ranks[4,2] + 3*ranks[4,3] + 4*ranks[4,4]+ 5*ranks[4,5] + 6*ranks[4,6] + 7*ranks[4,7] + 8*ranks[4,8],
+#pentasach
+meanrank.pentasach <- 1*ranks[5,1] + 2*ranks[5,2] + 3*ranks[5,3] + 4*ranks[5,4]+ 5*ranks[5,5] + 6*ranks[5,6] + 7*ranks[5,7] + 8*ranks[5,8],
+#placebo
+meanrank.placebo <- 1*ranks[6,1] + 2*ranks[6,2] + 3*ranks[6,3] + 4*ranks[6,4]+ 5*ranks[6,5] + 6*ranks[6,6] + 7*ranks[6,7] + 8*ranks[6,8],
+#ufh_int
+meanrank.ufh_int <- 1*ranks[7,1] + 2*ranks[7,2] + 3*ranks[7,3] + 4*ranks[7,4]+ 5*ranks[7,5] + 6*ranks[7,6] + 7*ranks[7,7] + 8*ranks[7,8],
+#ufh_low
+meanrank.ufh_low <- 1*ranks[8,1] + 2*ranks[8,2] + 3*ranks[8,3] + 4*ranks[8,4]+ 5*ranks[8,5] + 6*ranks[8,6] + 7*ranks[8,7] + 8*ranks[8,8]
+))
+
+print(round(meanranks,1))
+
+```
+
+**Overview of prior distributions**
+```{r}
+#between-trial standard deviation: 
+b.mcmc$model$hy.prior
+b.mcmc$model$om.scale
+
+#trial baselines and effect estimates: 
+#obtain standard deviation for the relative effects prior (normal distribution).
+b.mcmc$model$re.prior.sd 
+
+#calculate the precision: 
+1/(b.mcmc$model$re.prior.sd^2)
+```
+
+**Calculate prediction intervals**
+```{r}
+#rename treatments to numeric
+tmp <- b %>% mutate(treatment = ifelse(treatment=="placebo",1,
+                                ifelse(treatment=="none",2,
+                                ifelse(treatment=="lmwh_low",3,
+                                ifelse(treatment=="lmwh_int",4,
+                                ifelse(treatment=="ufh_low",5,
+                                ifelse(treatment=="ufh_int",6,
+                                ifelse(treatment=="pentasach",7,
+                                ifelse(treatment=="doac",8,NA)))))))))
+
+#redefine the network in order to retrieve the data in the format required for the gemtc rjags code
+network <- mtc.network(data.ab = tmp)
+
+model <- mtc.model(network, 
+                    linearModel = "random", 
+                    type = "consistency",
+                    likelihood = "binom",
+                    link = "logit",
+                    n.chain = 4, 
+                    hy.prior = mtc.hy.prior("std.dev", "dunif", 0, "om.scale"))
+
+dat <- model$dat
+inits <- model$inits
+
+#define the rjags code, based on gemtc output and supplemented to calculate prediction intervals
+model <- "model {
+	# Likelihood for arm-based data
+	for (i in studies.a) {
+		for (k in 1:na[i]) {
+			logit(p[i, k]) <- mu[i] + delta[i, k]
+			r[i, k] ~ dbin(p[i, k], n[i, k])
+			
+			rhat[i, k] <- p[i, k] * n[i, k]
+			dev[i, k] <- 2 *
+			  (r[i, k] * (log(r[i, k]) - log(rhat[i, k])) +
+			   (n[i, k]-r[i, k]) * (log(n[i, k] - r[i, k]) - log(n[i, k] - rhat[i, k])))
+		}
+	}
+	# Likelihood for contrast-based data (univariate for 2-arm trials)
+	## OMITTED
+	# Likelihood for contrast-based data (multivariate for multi-arm trials)
+	## OMITTED
+
+	# Random effects model
+	for (i in studies) {
+		# Study-level relative effects
+		w[i, 1] <- 0
+		delta[i, 1] <- 0
+		for (k in 2:na[i]) { # parameterize multi-arm trials using a trick to avoid dmnorm
+			delta[i, k] ~ dnorm(md[i, k], taud[i, k])
+			md[i, k] <- d[t[i, 1], t[i, k]] + sw[i, k]
+			taud[i, k] <- tau.d * 2 * (k - 1) / k
+			w[i, k] <- delta[i, k] - (d[t[i, 1], t[i, k]])
+			sw[i, k] <- sum(w[i, 1:(k-1)]) / (k - 1)
+		}
+	}
+	
+	# Random effects variance prior
+	sd.d ~ dunif(0, om.scale)
+	tau.d <- pow(sd.d, -2)
+
+	# Relative effect matrix
+	d[1, 1] <- 0
+	d[1, 2] <- -d.3.1 + d.3.5 + d.5.2
+	d[1, 3] <- -d.3.1
+	d[1, 4] <- -d.3.1 + d.3.4
+	d[1, 5] <- -d.3.1 + d.3.5
+	d[1, 6] <- -d.3.1 + d.3.6
+	d[1, 7] <- d.1.7
+	d[1, 8] <- -d.3.1 + d.3.4 + d.4.8
+	for (i in 2:nt) {
+		for (j in 1:nt) {
+			d[i, j] <- d[1, j] - d[1, i]
+		}
+	}
+
+	prior.prec <- pow(re.prior.sd, -2)
+
+	# Study baseline priors
+	for (i in studies.a) {
+	  mu[i] ~ dnorm(0, prior.prec)
+	}
+
+	# Effect parameter priors
+	d.1.4 ~ dnorm(0, prior.prec)
+	d.1.7 ~ dnorm(0, prior.prec)
+	d.3.1 ~ dnorm(0, prior.prec)
+	d.3.4 ~ dnorm(0, prior.prec)
+	d.3.5 ~ dnorm(0, prior.prec)
+	d.3.6 ~ dnorm(0, prior.prec)
+	d.4.8 ~ dnorm(0, prior.prec)
+	d.5.2 ~ dnorm(0, prior.prec)
+
+  # Prediction intervals
+  pred.d.12 ~ dnorm(d[1, 2], tau.d) 
+  pred.d.13 ~ dnorm(d[1, 3], tau.d)
+  pred.d.14 ~ dnorm(d[1, 4], tau.d) 
+  pred.d.15 ~ dnorm(d[1, 5], tau.d) 
+  pred.d.16 ~ dnorm(d[1, 6], tau.d) 
+  pred.d.17 ~ dnorm(d[1, 7], tau.d)
+  pred.d.18 ~ dnorm(d[1, 8], tau.d) 
+  
+  # Prediction intervals (odds ratio scale)
+  pred.or.12 <- exp(pred.d.12)
+  pred.or.13 <- exp(pred.d.13)
+  pred.or.14 <- exp(pred.d.14)
+  pred.or.15 <- exp(pred.d.15)
+  pred.or.16 <- exp(pred.d.16)
+  pred.or.17 <- exp(pred.d.17)
+  pred.or.18 <- exp(pred.d.18)
+}"
+```
+
+```{r, eval = T}
+#fit and run model
+model.fit <- jags.model(file=textConnection(model), data = dat, n.chains = 4)
+
+update(model.fit, 50000)
+
+samples <- coda.samples(model.fit, n.iter=250000, thin = 10, variable.names = 
+c("sd.d", "pred.or.12","pred.or.13","pred.or.14","pred.or.15","pred.or.16","pred.or.17","pred.or.18"))
+```
+
+```{r, fig.width=10, fig.height=8}
+#convergence
+plot(samples, trace=TRUE, density = TRUE)  
+
+#prediction interval credible intervals
+pred <- as.data.frame(summary(samples)[2]) %>% 
+  rownames_to_column() %>% 
+  select(rowname, quantiles.2.5., quantiles.50., quantiles.97.5.) %>%
+  rename(comp = rowname, ci.l = quantiles.2.5., median=quantiles.50., ci.u=quantiles.97.5.) %>%
+  mutate_if(is.numeric, round,2)
+
+print(pred)
+
+```
+
+
+# Main analysis - serious adverse events
+**Define network**
+```{r, network}
+#sensitivity set
+sensitivity <- s
+
+#vector of studies focusing on populations of primary interest
+pop <- data %>% 
+  filter(population %in% c("cardiology","critically ill", "medical", "stroke")) %>% 
+  pull(study) %>%
+  unique()
+
+#vector of studies with uncommonly used interventions that may add heterogeneity
+int.sparse <- data %>% 
+  filter(treatment %in% c("vka", "tar", "heparinoid")) %>%
+  pull(study) %>%
+  unique()
+
+#main data, excluding uncommonly used interventions
+s <- s %>% 
+  filter(study %in% pop & !study %in% int.sparse)
+
+#basic descriptives
+dscr <- data.prep(arm.data = s,
+                  varname.t = "treatment",
+                  varname.s = "study")
+
+char <- net.tab(data = dscr,
+                outcome = "responders",
+                N = "sampleSize", 
+                type.outcome = "binomial",
+                time = NULL)
+
+#network summary statistics
+char$network
+#network summary statistics by treatment
+char$intervention 
+#network summary statistics according to direct comparisons
+char$comparison
+
+#network of all eligible trials, numbers represent direct comparisons
+network <- mtc.network(data = s, treatments = treat.code[treat.code$id %in% s$treatment,])
+net.plot(dscr, node.scale = 2, edge.scale=2,study.counts=TRUE)
+```
+
+**Define and run the model**
+```{r, s.mcmc, eval = T}
+#define NMA model
+model <- mtc.model(network, 
+                    linearModel = "random", 
+                    type = "consistency",
+                    likelihood = "binom",
+                    link = "logit",
+                    n.chain = 4, 
+                    hy.prior = mtc.hy.prior("std.dev", "dunif", 0, "om.scale")) #set vague prior for between study heterogeneity 
+
+#run model
+s.mcmc <- mtc.run(model, 
+                 n.adapt = 50000, #burn-in
+                 n.iter = 250000, #iterations
+                 thin = 10)
+``` 
+
+**Algorithm convergence**
+```{r, figures-s.mcmc, fig.width=10, fig.height=8}
+#algorithm convergence, iteration plots and prior densities
+plot(s.mcmc)
+gelman.plot(s.mcmc)
+
+#overall PSFR
+diag <- gelman.diag(s.mcmc); diag$psrf; diag$mpsrf
+
+```
+
+**Model fit**
+```{r, figures-deviance, fig.width=6, fig.height = 6}
+s.mcmc$deviance$Dbar #residual deviance
+s.mcmc$deviance$`data points` #total data points
+s.mcmc$deviance$pD #effective parameters
+s.mcmc$deviance$DIC #deviance information criterion
+
+deviance <- mtc.deviance(s.mcmc) 
+
+#residual deviance plot
+mtc.devplot(deviance)
+
+#leverage plot
+mtc.levplot(deviance)
+
+```
+
+**Consistency: nodesplitting**
+```{r, nodesplit, eval = T, message = F}
+#assessment of consistency
+s.nodesplit <- mtc.nodesplit(network, 
+                            linearModel = "random", 
+                            n.adapt = 50000, 
+                            n.iter = 250000, 
+                            thin = 10)
+```
+
+```{r}
+#No evidence of inconsistency but some estimates appear unstable probably due to sparse events.
+plot(summary(s.nodesplit))
+```
+
+**Inferences**
+```{r}
+#overall results
+summary(s.mcmc)
+
+#efficacy compared to placebo
+forest(relative.effect(s.mcmc, t1 = "placebo"), use.description = TRUE)
+
+#rank probability
+rank.prob <- rank.probability(s.mcmc, preferredDirection = -1)
+
+#rankogram
+plot(rank.prob, beside=TRUE, cex.names=0.75)
+
+#SUCRA
+cumrank.prob <- apply(t(rank.prob), 2, cumsum)
+sucra <- round(colMeans(cumrank.prob[-nrow(cumrank.prob),]),4)
+print(sucra)
+
+```
+
+**Calculate mean ranks**
+```{r}
+#calculate mean ranks
+ranks <- rank.prob
+print(ranks)
+
+meanranks <- as.table(c(
+#lmwh_int
+meanrank.lmwh_int <- 1*ranks[1,1] + 2*ranks[1,2] + 3*ranks[1,3] + 4*ranks[1,4]+ 5*ranks[1,5],
+#lmwh_low
+meanrank.lmwh_low <- 1*ranks[2,1] + 2*ranks[2,2] + 3*ranks[2,3] + 4*ranks[2,4]+ 5*ranks[2,5],
+#placebo
+meanrank.placebo <- 1*ranks[3,1] + 2*ranks[3,2] + 3*ranks[3,3] + 4*ranks[3,4]+ 5*ranks[3,5],
+#ufh_int
+meanrank.ufh_int <- 1*ranks[4,1] + 2*ranks[4,2] + 3*ranks[4,3] + 4*ranks[4,4]+ 5*ranks[4,5],
+#ufh_low
+meanrank.ufh_low <- 1*ranks[5,1] + 2*ranks[5,2] + 3*ranks[5,3] + 4*ranks[5,4]+ 5*ranks[5,5]
+))
+
+print(round(meanranks,1))
+```
+
+**Overview of prior distributions**
+```{r}
+#between-trial standard deviation: 
+s.mcmc$model$hy.prior
+s.mcmc$model$om.scale
+
+#trial baselines and effect estimates: 
+#obtain standard deviation for the relative effects prior (normal distribution).
+s.mcmc$model$re.prior.sd 
+
+#calculate the precision: 
+1/(s.mcmc$model$re.prior.sd^2)
+```
+
+**Calculate prediction intervals**
+```{r}
+#rename treatments to numeric
+tmp <- s %>% mutate(treatment = ifelse(treatment=="placebo",1,
+                                ifelse(treatment=="lmwh_low",2,
+                                ifelse(treatment=="lmwh_int",3,
+                                ifelse(treatment=="ufh_low",4,
+                                ifelse(treatment=="ufh_int",5,NA))))))
+
+#redefine the network in order to retrieve the data in the format required for the gemtc rjags code
+network <- mtc.network(data = tmp)
+
+model <- mtc.model(network, 
+                    linearModel = "random", 
+                    type = "consistency",
+                    likelihood = "binom",
+                    link = "logit",
+                    n.chain = 4, 
+                    hy.prior = mtc.hy.prior("std.dev", "dunif", 0, "om.scale"))
+
+dat <- model$dat
+
+#define the rjags code, based on gemtc output and supplemented to calculate prediction intervals
+model <- "model {
+	# Likelihood for arm-based data
+	for (i in studies.a) {
+		for (k in 1:na[i]) {
+			logit(p[i, k]) <- mu[i] + delta[i, k]
+			r[i, k] ~ dbin(p[i, k], n[i, k])
+			
+			rhat[i, k] <- p[i, k] * n[i, k]
+			dev[i, k] <- 2 *
+			  (r[i, k] * (log(r[i, k]) - log(rhat[i, k])) +
+			   (n[i, k]-r[i, k]) * (log(n[i, k] - r[i, k]) - log(n[i, k] - rhat[i, k])))
+		}
+	}
+	# Likelihood for contrast-based data (univariate for 2-arm trials)
+	## OMITTED
+	# Likelihood for contrast-based data (multivariate for multi-arm trials)
+	## OMITTED
+
+	# Random effects model
+	for (i in studies) {
+		# Study-level relative effects
+		w[i, 1] <- 0
+		delta[i, 1] <- 0
+		for (k in 2:na[i]) { # parameterize multi-arm trials using a trick to avoid dmnorm
+			delta[i, k] ~ dnorm(md[i, k], taud[i, k])
+			md[i, k] <- d[t[i, 1], t[i, k]] + sw[i, k]
+			taud[i, k] <- tau.d * 2 * (k - 1) / k
+			w[i, k] <- delta[i, k] - (d[t[i, 1], t[i, k]])
+			sw[i, k] <- sum(w[i, 1:(k-1)]) / (k - 1)
+		}
+	}
+	
+	# Random effects variance prior
+	sd.d ~ dunif(0, om.scale)
+	tau.d <- pow(sd.d, -2)
+
+	# Relative effect matrix
+	d[1, 1] <- 0
+	d[1, 2] <- d.1.2
+	d[1, 3] <- d.1.3
+	d[1, 4] <- d.1.2 + d.2.4
+	d[1, 5] <- d.1.2 + d.2.5
+	for (i in 2:nt) {
+		for (j in 1:nt) {
+			d[i, j] <- d[1, j] - d[1, i]
+		}
+	}
+
+	prior.prec <- pow(re.prior.sd, -2)
+
+	# Study baseline priors
+	for (i in studies.a) {
+	  mu[i] ~ dnorm(0, prior.prec)
+	}
+
+	# Effect parameter priors
+	d.1.2 ~ dnorm(0, prior.prec)
+	d.1.3 ~ dnorm(0, prior.prec)
+	d.2.4 ~ dnorm(0, prior.prec)
+	d.2.5 ~ dnorm(0, prior.prec)
+	
+  # Prediction intervals
+  pred.d.12 ~ dnorm(d[1, 2], tau.d) 
+  pred.d.13 ~ dnorm(d[1, 3], tau.d)
+  pred.d.14 ~ dnorm(d[1, 4], tau.d) 
+  pred.d.15 ~ dnorm(d[1, 5], tau.d) 
+  
+  # Prediction intervals (odds ratio scale)
+  pred.or.12 <- exp(pred.d.12)
+  pred.or.13 <- exp(pred.d.13)
+  pred.or.14 <- exp(pred.d.14)
+  pred.or.15 <- exp(pred.d.15)
+}"
+```
+
+```{r, eval = T}
+#fit and run model
+model.fit <- jags.model(file=textConnection(model), data = dat, n.chains = 4)
+
+update(model.fit, 50000)
+
+samples <- coda.samples(model.fit, n.iter=250000, thin = 10, variable.names = c("sd.d","pred.or.12","pred.or.13","pred.or.14","pred.or.15"))
+```
+
+```{r, fig.width=10, fig.height=8}
+#convergence
+plot(samples, trace=TRUE, density = TRUE)  
+
+#prediction interval credible intervals
+pred <- as.data.frame(summary(samples)[2]) %>% 
+  rownames_to_column() %>% 
+  select(rowname, quantiles.2.5., quantiles.50., quantiles.97.5.) %>%
+  rename(comp = rowname, ci.l = quantiles.2.5., median=quantiles.50., ci.u=quantiles.97.5.) %>%
+  mutate_if(is.numeric, round,2)
+
+print(pred)
+
+```
